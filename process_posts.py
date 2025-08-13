@@ -175,29 +175,52 @@ def format_email_body(posts):
 def get_gmail_credentials():
     """
     Authenticates with Google and returns credentials.
-    Handles the OAuth 2.0 flow.
+    Handles the OAuth 2.0 flow. In a Lambda environment, it relies on a
+    packaged token.json and will not attempt to write back the refreshed token.
     """
     creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', GMAIL_SCOPES)
+    # Use the script's directory to build absolute paths to token/credentials files.
+    # This is more robust for different execution environments like AWS Lambda.
+    script_dir = os.path.dirname(__file__)
+    token_path = os.path.join(script_dir, 'token.json')
+
+    # The file token.json stores the user's access and refresh tokens.
+    # It's created automatically during the first-time local authorization.
+    if os.path.exists(token_path):
+        try:
+            creds = Credentials.from_authorized_user_file(token_path, GMAIL_SCOPES)
+        except (ValueError, json.JSONDecodeError):
+            # If token.json is invalid or empty, we'll proceed as if it's not there.
+            print("Warning: token.json is invalid or empty. A new one will be created.")
+            creds = None
     
-    # If there are no (valid) credentials available, let the user log in.
+    # If there are no (valid) credentials available, attempt to refresh or run local auth.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            
+            # Only try to save the refreshed credentials if NOT in a read-only
+            # environment like AWS Lambda. We detect Lambda by checking for a common
+            # environment variable.
+            is_lambda = 'AWS_LAMBDA_FUNCTION_NAME' in os.environ
+            if not is_lambda:
+                with open(token_path, 'w') as token:
+                    token.write(creds.to_json())
         else:
             # This part requires user interaction, so it must be done locally
-            # before deploying to Lambda.
+            # before deploying to Lambda. It needs 'credentials.json'.
+            credentials_path = os.path.join(script_dir, 'credentials.json')
+            if not os.path.exists(credentials_path):
+                print("Error: 'credentials.json' not found. This is required for the initial auth flow.")
+                return None
+            
             flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', GMAIL_SCOPES)
+                credentials_path, GMAIL_SCOPES)
             creds = flow.run_local_server(port=0)
-        
-        # Save the credentials for the next run
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+            
+            # Save the newly generated credentials for the next run
+            with open(token_path, 'w') as token:
+                token.write(creds.to_json())
     return creds
 
 def send_email_gmail(subject, body_html):
